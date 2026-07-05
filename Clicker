@@ -1,0 +1,178 @@
+import asyncio
+import sqlite3
+
+from aiogram import Bot, Dispatcher, F
+from aiogram.filters import CommandStart
+from aiogram.types import Message, CallbackQuery
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+TOKEN = "ВАШ_ТОКЕН"
+
+bot = Bot(TOKEN)
+dp = Dispatcher()
+
+db = sqlite3.connect("users.db")
+cursor = db.cursor()
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS users(
+    id INTEGER PRIMARY KEY,
+    username TEXT,
+    score INTEGER DEFAULT 0,
+    multiplier INTEGER DEFAULT 1
+)
+""")
+db.commit()
+
+
+def get_user(user):
+    cursor.execute("SELECT * FROM users WHERE id=?", (user.id,))
+    data = cursor.fetchone()
+
+    if data is None:
+        username = user.username or user.first_name
+        cursor.execute(
+            "INSERT INTO users(id, username, score, multiplier) VALUES(?,?,0,1)",
+            (user.id, username)
+        )
+        db.commit()
+        cursor.execute("SELECT * FROM users WHERE id=?", (user.id,))
+        data = cursor.fetchone()
+
+    return data
+
+
+def menu():
+    kb = InlineKeyboardBuilder()
+
+    kb.button(text="➕ +1", callback_data="click")
+    kb.button(text="🛒 Магазин", callback_data="shop")
+    kb.button(text="🏆 Лидерборд", callback_data="top")
+
+    kb.adjust(1)
+
+    return kb.as_markup()
+
+
+@dp.message(CommandStart())
+async def start(message: Message):
+    get_user(message.from_user)
+
+    await message.answer(
+        "Добро пожаловать в кликер!\n\n"
+        "Нажимай кнопку и зарабатывай очки.",
+        reply_markup=menu()
+    )
+
+
+@dp.callback_query(F.data == "click")
+async def click(callback: CallbackQuery):
+    user = get_user(callback.from_user)
+
+    score = user[2] + user[3]
+
+    cursor.execute(
+        "UPDATE users SET score=? WHERE id=?",
+        (score, callback.from_user.id)
+    )
+    db.commit()
+
+    await callback.message.edit_text(
+        f"🏆 Очки: {score}\n"
+        f"⚡ Множитель: x{user[3]}",
+        reply_markup=menu()
+    )
+
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "shop")
+async def shop(callback: CallbackQuery):
+    user = get_user(callback.from_user)
+
+    kb = InlineKeyboardBuilder()
+
+    kb.button(text="Купить x2 (1 очко)", callback_data="buy2")
+    kb.button(text="Назад", callback_data="back")
+
+    kb.adjust(1)
+
+    await callback.message.edit_text(
+        f"🛒 Магазин\n\n"
+        f"Ваши очки: {user[2]}",
+        reply_markup=kb.as_markup()
+    )
+
+
+@dp.callback_query(F.data == "buy2")
+async def buy(callback: CallbackQuery):
+    user = get_user(callback.from_user)
+
+    score = user[2]
+    mult = user[3]
+
+    if mult >= 2:
+        await callback.answer("Уже куплено!", show_alert=True)
+        return
+
+    if score < 1:
+        await callback.answer("Недостаточно очков!", show_alert=True)
+        return
+
+    cursor.execute(
+        "UPDATE users SET score=?, multiplier=2 WHERE id=?",
+        (score - 1, callback.from_user.id)
+    )
+    db.commit()
+
+    await callback.answer("Покупка успешна!")
+
+    cursor.execute("SELECT score,multiplier FROM users WHERE id=?", (callback.from_user.id,))
+    score, mult = cursor.fetchone()
+
+    await callback.message.edit_text(
+        f"🏆 Очки: {score}\n"
+        f"⚡ Множитель: x{mult}",
+        reply_markup=menu()
+    )
+
+
+@dp.callback_query(F.data == "top")
+async def top(callback: CallbackQuery):
+    cursor.execute("""
+        SELECT username, score
+        FROM users
+        ORDER BY score DESC
+        LIMIT 10
+    """)
+
+    users = cursor.fetchall()
+
+    text = "🏆 Лидерборд\n\n"
+
+    for i, (name, score) in enumerate(users, 1):
+        text += f"{i}. {name} — {score}\n"
+
+    await callback.message.edit_text(
+        text,
+        reply_markup=menu()
+    )
+
+
+@dp.callback_query(F.data == "back")
+async def back(callback: CallbackQuery):
+    user = get_user(callback.from_user)
+
+    await callback.message.edit_text(
+        f"🏆 Очки: {user[2]}\n"
+        f"⚡ Множитель: x{user[3]}",
+        reply_markup=menu()
+    )
+
+
+async def main():
+    await dp.start_polling(bot)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
